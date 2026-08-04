@@ -1,0 +1,9 @@
+streamlit>=1.38
+pandas
+numpy
+sqlalchemy
+pymysql
+plotly
+openpyxl
+fpdf2
+streamlit-autorefresh

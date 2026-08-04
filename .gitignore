@@ -1,0 +1,12 @@
+# Ne jamais versionner les identifiants
+.streamlit/secrets.toml
+secrets.toml
+
+# Environnements Python
+venv/
+__pycache__/
+*.pyc
+
+# Fichiers générés
+*.xlsx
+*.pdf

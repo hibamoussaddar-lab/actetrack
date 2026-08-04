@@ -1,0 +1,11 @@
+[theme]
+base = "dark"
+primaryColor = "#4FA8FF"
+backgroundColor = "#0B0E14"
+secondaryBackgroundColor = "#171B24"
+textColor = "#F5F7FA"
+font = "sans serif"
+
+[server]
+enableCORS = false
+maxMessageSize = 300
