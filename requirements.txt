@@ -1,9 +1,8 @@
-streamlit>=1.38
+streamlit
 pandas
 numpy
+plotly
 sqlalchemy
 pymysql
-plotly
-openpyxl
 fpdf2
-streamlit-autorefresh
+openpyxl
