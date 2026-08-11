@@ -936,8 +936,22 @@ NAV = st.session_state["nav"]
 # sélectionné : Streamlit affiche automatiquement l'indicateur « en cours de
 # chargement » pendant toute la durée du bloc (requêtes SQL incluses) et le retire
 # dès que le rendu est terminé — sans rerun manuel ni page « fantôme » entre-temps.
+#
+# _tab_slot est un placeholder positionnel : comme il est créé au même endroit du
+# script à chaque exécution, Streamlit le reconnaît comme LE MÊME emplacement d'un
+# run à l'autre. Appeler _tab_slot.empty() envoie donc immédiatement un ordre de
+# suppression pour tout ce qui s'y trouvait (les graphiques de l'onglet précédent),
+# AVANT de lancer les requêtes SQL de l'onglet nouvellement sélectionné — au lieu
+# d'attendre la fin du script pour que Streamlit fasse le ménage (ce qui est ce qui
+# causait le mélange ancien/nouveau visible pendant le chargement).
+# On utilise __enter__/__exit__ plutôt que "with _tab_slot.container():" pour ne pas
+# avoir à réindenter tout le bloc if/elif ci-dessous.
 # ==============================================================================
+_tab_slot = st.empty()
 with st.spinner("Chargement…"):
+    _tab_slot.empty()
+    _tab_ctx = _tab_slot.container()
+    _tab_ctx.__enter__()
     if NAV == "synthese":
         where_h, gp = gfilter_where("h")
         kpi = run_query(f"""
@@ -2615,49 +2629,76 @@ with st.spinner("Chargement…"):
                     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
                     st.caption("Nombre de corrections par jour effectuées par cet agent, avec la tendance sur 7 jours glissants.")
 
-                # --- rythme de travail de l'agent : bulles jour × heure ---
-                # Ni heatmap (cases colorées pleines), ni nuage de points brut (illisible/lourd
-                # au-delà de quelques milliers de points pour un agent très actif), ni tableau :
-                # un point par (jour, heure) où l'agent a été actif, avec la TAILLE de la bulle qui
-                # donne le volume de corrections sur ce créneau, la COULEUR le type d'action
-                # dominant, et le survol qui détaille le champ le plus modifié. Reste net même pour
-                # 28k+ corrections, car agrégé par créneau plutôt qu'un point par modification.
+                # --- journal détaillé des corrections de l'agent : date + heure complètes, champ
+                # corrigé, type de correction et valeurs avant/après — une version chronologique
+                # (un point = une correction, positionnée sur sa date/heure exacte) ET une version
+                # tableau, triable et exportable en CSV/Excel.
                 RAW_FETCH_CAP = 300000  # garde-fou anti-scan complet, pas une limite d'affichage
                 mod_count_a = int(daily_a["nb"].sum()) if not daily_a.empty else 0
                 if mod_count_a and mod_count_a <= RAW_FETCH_CAP:
                     detail_a = run_query(f"""
-                        SELECT h.date_modif_acte AS date_modif, h.col_name AS champ, h.type_action, h.id_acte
+                        SELECT h.date_modif_acte AS date_modif, h.id_acte, h.col_name AS champ,
+                               h.type_action, h.old_value, h.new_value
                         FROM webman_tmp.tr_hist_change h JOIN webman_users.tr_user u ON h.id_user = u.cin
                         WHERE {where_h} AND u.full_name = :agent
                         ORDER BY h.date_modif_acte
                     """, params=a_params)
                     detail_a["date_modif"] = pd.to_datetime(detail_a["date_modif"])
-                    detail_a["jour"] = detail_a["date_modif"].dt.floor("D")
-                    detail_a["heure"] = detail_a["date_modif"].dt.hour
                     detail_a["champ"] = detail_a["champ"].fillna("—")
-
-                    punch = (detail_a.groupby(["jour", "heure"])
-                             .agg(nb=("champ", "size"),
-                                  type_dominant=("type_action", lambda s: s.mode().iat[0]),
-                                  champ_top=("champ", lambda s: s.value_counts().idxmax()))
-                             .reset_index())
+                    detail_a["old_value"] = detail_a["old_value"].fillna("").astype(str)
+                    detail_a["new_value"] = detail_a["new_value"].fillna("").astype(str)
+                    # versions raccourcies pour le survol du graphique (les valeurs peuvent être longues) ;
+                    # le tableau et l'export, eux, gardent les valeurs complètes.
+                    detail_a["avant_court"] = detail_a["old_value"].str.slice(0, 60) + \
+                        detail_a["old_value"].str.len().gt(60).map({True: "…", False: ""})
+                    detail_a["apres_court"] = detail_a["new_value"].str.slice(0, 60) + \
+                        detail_a["new_value"].str.len().gt(60).map({True: "…", False: ""})
 
                     fig = px.scatter(
-                        punch, x="heure", y="jour", size="nb", color="type_dominant",
-                        hover_data={"nb": True, "champ_top": True, "heure": False, "jour": False, "type_dominant": False},
-                        template=PLOTLY_TEMPLATE, size_max=32,
-                        title=f"Rythme de travail de {selected_name} — jour × heure "
+                        detail_a, x="date_modif", y="champ", color="type_action",
+                        hover_data={"id_acte": True, "avant_court": True, "apres_court": True,
+                                    "date_modif": True, "champ": False, "type_action": False},
+                        template=PLOTLY_TEMPLATE,
+                        title=f"Corrections de {selected_name} — date, heure et champ "
                               f"({mod_count_a:,} corrections au total)".replace(",", " "),
                         color_discrete_map={"UPDATE": COLORS["green"], "DELETE": COLORS["coral"], "INSERT": COLORS["blue"]},
-                        labels={"heure": "Heure de la journée", "jour": "Date", "type_dominant": "Type dominant"},
+                        labels={"date_modif": "Date et heure", "champ": "Champ corrigé", "type_action": "Type",
+                                "avant_court": "Avant", "apres_court": "Après", "id_acte": "Acte"},
                     )
-                    fig.update_traces(marker=dict(line=dict(width=0), opacity=0.85))
-                    fig.update_layout(height=max(420, min(700, 26 * punch["jour"].nunique())),
-                                      xaxis=dict(range=[-0.5, 23.5], dtick=2), legend_title_text="Type dominant")
+                    fig.update_traces(marker=dict(size=8, opacity=0.75, line=dict(width=0)))
+                    fig.update_layout(height=max(420, min(700, 26 * detail_a["champ"].nunique())),
+                                      xaxis_title="Date et heure", yaxis_title="Champ corrigé",
+                                      legend_title_text="Type")
                     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
-                    st.caption("Chaque bulle = un créneau (jour, heure) où l'agent a été actif. Sa taille donne le "
-                               "nombre de corrections sur ce créneau, sa couleur le type d'action dominant — "
-                               "survolez une bulle pour voir le champ le plus modifié à ce moment-là.")
+                    st.caption("Chaque point = une correction, positionnée sur sa date et son heure exactes, "
+                               "réparties par champ corrigé. La couleur indique le type d'action — survolez "
+                               "un point pour voir l'acte concerné et les valeurs avant/après.")
+
+                    with st.expander(f"🧾 Tableau détaillé des corrections de {selected_name} "
+                                      f"({mod_count_a:,} lignes)".replace(",", " "), expanded=False):
+                        table_a = detail_a[["date_modif", "id_acte", "champ", "type_action",
+                                             "old_value", "new_value"]].copy()
+                        table_a = table_a.sort_values("date_modif", ascending=False)
+                        table_a["date_modif"] = table_a["date_modif"].dt.strftime("%d/%m/%Y %H:%M:%S")
+                        table_a.columns = ["Date et heure", "Acte", "Champ corrigé", "Type",
+                                           "Valeur avant", "Valeur après"]
+                        st.dataframe(table_a, use_container_width=True, hide_index=True, height=420)
+                        exp1, exp2 = st.columns(2)
+                        with exp1:
+                            st.download_button("⬇️ Exporter en CSV",
+                                               data=table_a.to_csv(index=False).encode("utf-8-sig"),
+                                               file_name=f"actetrack_corrections_{str(selected_name).replace(' ', '_')}.csv",
+                                               mime="text/csv", use_container_width=True,
+                                               key="export_detail_agent_csv")
+                        with exp2:
+                            xbuf_a = io.BytesIO()
+                            with pd.ExcelWriter(xbuf_a, engine="openpyxl") as writer:
+                                table_a.to_excel(writer, sheet_name="Corrections", index=False)
+                            st.download_button("⬇️ Exporter en Excel",
+                                               data=xbuf_a.getvalue(),
+                                               file_name=f"actetrack_corrections_{str(selected_name).replace(' ', '_')}.xlsx",
+                                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                               use_container_width=True, key="export_detail_agent_xlsx")
                 else:
                     st.info(f"Volume trop important ({mod_count_a:,}".replace(",", " ") +
                             " corrections) pour être agrégé sans ralentir la page — réduisez la période sélectionnée.")
@@ -3367,3 +3408,5 @@ with st.spinner("Chargement…"):
                                     mime="application/pdf", use_container_width=True)
             except Exception as e:
                 st.error(f"⚠️ Impossible de générer le PDF : {e}")
+
+    _tab_ctx.__exit__(None, None, None)
