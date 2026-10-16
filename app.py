@@ -538,7 +538,10 @@ def _compute_alert_count() -> int:
 
 
 def safe_div(a, b):
-    return (a / b) if b else 0.0
+    # a peut valoir None (SUM() MySQL sur 0 ligne -> NULL) ou Decimal : on sécurise les deux cas.
+    if a is None or not b:
+        return 0.0
+    return float(a) / float(b)
 
 
 # Comptes de test/service repérés dans tr_user (ex: "Users Test 11", "TEST5", "AGENT AUTO",
@@ -956,8 +959,10 @@ with st.spinner("Chargement…"):
         where_h, gp = gfilter_where("h")
         kpi = run_query(f"""
             SELECT COUNT(*) AS total, COUNT(DISTINCT id_acte) AS actes,
-                   SUM(type_action='UPDATE') AS n_update, SUM(type_action='DELETE') AS n_delete,
-                   SUM(type_action='INSERT') AS n_insert, SUM(id_user IS NULL) AS non_attribue
+                   COALESCE(SUM(type_action='UPDATE'), 0) AS n_update,
+                   COALESCE(SUM(type_action='DELETE'), 0) AS n_delete,
+                   COALESCE(SUM(type_action='INSERT'), 0) AS n_insert,
+                   COALESCE(SUM(id_user IS NULL), 0) AS non_attribue
             FROM webman_tmp.tr_hist_change h WHERE {where_h}
         """, params=gp).iloc[0]
         total = int(kpi["total"]) or 1
@@ -1647,13 +1652,17 @@ with st.spinner("Chargement…"):
             def _period_kpi(d1, d2):
                 return run_query("""
                     SELECT COUNT(*) AS total, COUNT(DISTINCT id_acte) AS actes, COUNT(DISTINCT id_user) AS agents,
-                           SUM(type_action='UPDATE') AS n_update, SUM(type_action='DELETE') AS n_delete,
-                           SUM(id_user IS NULL) AS non_attribue
+                           COALESCE(SUM(type_action='UPDATE'), 0) AS n_update,
+                           COALESCE(SUM(type_action='DELETE'), 0) AS n_delete,
+                           COALESCE(SUM(id_user IS NULL), 0) AS non_attribue
                     FROM webman_tmp.tr_hist_change WHERE date_modif_acte BETWEEN :d1 AND :d2
                 """, params={"d1": d1, "d2": d2}).iloc[0]
 
             ka, kb = _period_kpi(*pa_range), _period_kpi(*pb_range)
             total_a, total_b = int(ka["total"]) or 1, int(kb["total"]) or 1
+            if int(ka["total"]) == 0 or int(kb["total"]) == 0:
+                st.warning("⚠️ Une des deux périodes ne contient aucune donnée : les pourcentages "
+                           "affichés pour cette période valent 0.")
 
             def _fmt(v):
                 return f"{v:.1f}%" if isinstance(v, float) else f"{v:,}".replace(",", " ")
@@ -3340,8 +3349,10 @@ with st.spinner("Chargement…"):
 
         kpi = run_query(f"""
             SELECT COUNT(*) AS total, COUNT(DISTINCT id_acte) AS actes,
-                   SUM(type_action='UPDATE') AS n_update, SUM(type_action='DELETE') AS n_delete,
-                   SUM(type_action='INSERT') AS n_insert, SUM(id_user IS NULL) AS non_attribue
+                   COALESCE(SUM(type_action='UPDATE'), 0) AS n_update,
+                   COALESCE(SUM(type_action='DELETE'), 0) AS n_delete,
+                   COALESCE(SUM(type_action='INSERT'), 0) AS n_insert,
+                   COALESCE(SUM(id_user IS NULL), 0) AS non_attribue
             FROM webman_tmp.tr_hist_change h WHERE {where_h}
         """, params=gp).iloc[0]
         top_agents = run_query(f"""
